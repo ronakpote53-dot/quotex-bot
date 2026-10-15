@@ -1,11 +1,5 @@
 from flask import Flask
 import threading, os
-
-app = Flask(__name__)
-@app.route('/')
-def home(): return "Bot Active"
-threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
-
 import asyncio
 import sqlite3
 import logging
@@ -14,14 +8,28 @@ import numpy as np
 import pandas as pd
 import requests
 
-# 1. Logging Setup
+# 1. Initialize Flask server for Render port binding (Port 10000)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Quotex Trading Bot is running 24/7!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# Start web server in a separate thread
+threading.Thread(target=run_web, daemon=True).start()
+
+# 2. Logging Setup
 logging.basicConfig(
     filename='quotex_bot_execution.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# 2. Telegram Credentials
+# 3. Telegram Credentials
 TELEGRAM_BOT_TOKEN = "8850686281:AAFQms3YLnynRzHTP8BpZv-AjG5gpNZszpw"
 TELEGRAM_CHAT_ID = "5359177105"
 
@@ -60,6 +68,27 @@ class DatabaseManager:
         ''', (result, signal_id))
         self.conn.commit()
 
+    def get_performance_report(self):
+        # Get total wins and losses
+        self.cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'WIN'")
+        total_wins = self.cursor.fetchone()[0]
+        
+        self.cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'LOSS'")
+        total_losses = self.cursor.fetchone()[0]
+        
+        total_trades = total_wins + total_losses
+        win_rate = (total_wins / total_trades) * 100 if total_trades > 0 else 0
+        
+        report_message = (
+            f"📊 *Quotex Bot Performance Report*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Total Wins: {total_wins}\n"
+            f"❌ Total Losses: {total_losses}\n"
+            f"📈 Total Trades: {total_trades}\n"
+            f"🎯 Win Rate: {win_rate:.2f}%"
+        )
+        return report_message
+
 
 class GlitchIndicatorEngine:
     @staticmethod
@@ -90,7 +119,6 @@ class GlitchIndicatorEngine:
         curr = candle_history[-1]
         prev = candle_history[-2]
 
-        # 3. Glitch and Gap Detection Logic
         gap = curr['open'] - prev['close']
         if gap > 0.0008:
             return "PUT (DOWN)", "Gap-Up Glitch Reversal", 85
@@ -144,6 +172,7 @@ class QuotexBotCore:
         print("Quotex Live Bot Started Successfully...")
         TelegramNotifier.send_alert("🚀 *Ronak, Your Quotex Live Bot is Running 24/7!*")
 
+        report_counter = 0
         while True:
             try:
                 for pair in self.active_pairs:
@@ -167,7 +196,14 @@ class QuotexBotCore:
                         )
                         TelegramNotifier.send_alert(alert_msg)
                         await asyncio.sleep(2)
-                        
+                
+                # Send performance report periodically or after cycles if needed
+                report_counter += 1
+                if report_counter >= 30:  # e.g., every 30 loops
+                    report = self.db.get_performance_report()
+                    TelegramNotifier.send_alert(report)
+                    report_counter = 0
+
                 # Scan market every 60 seconds
                 await asyncio.sleep(60)
 
@@ -178,69 +214,3 @@ class QuotexBotCore:
 if __name__ == "__main__":
     bot = QuotexBotCore()
     asyncio.run(bot.run_scanner())
-      
-from flask import Flask
-import threading
-import os
-import sqlite3
-import time
-from datetime import datetime
-
-# 1. Initialize Flask server for Render port binding (Port 10000)
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot Active"
-
-threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
-
-# 2. Initialize database to store Win/Loss statistics
-def init_db():
-    conn = sqlite3.connect('quotex_stats.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pair TEXT,
-            direction TEXT,
-            entry_price REAL,
-            result TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# 3. Function to track, evaluate signals and calculate win/loss percentages
-def track_and_evaluate_signal(pair, direction, entry_price, exit_price):
-    conn = sqlite3.connect('quotex_stats.db')
-    cursor = conn.cursor()
-    
-    # Determine result based on direction and price movement
-    if direction == "CALL (UP)" and exit_price > entry_price:
-        result = "WIN"
-    elif direction == "PUT (DOWN)" and exit_price < entry_price:
-        result = "WIN"
-    else:
-        result = "LOSS"
-        
-    cursor.execute("INSERT INTO signals (pair, direction, entry_price, result) VALUES (?, ?, ?, ?)",
-                   (pair, direction, entry_price, result))
-    conn.commit()
-    
-    # Calculate overall Win % and Loss %
-    cursor.execute("SELECT COUNT(*) FROM signals")
-    total = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'WIN'")
-    wins = cursor.fetchone()[0]
-    
-    win_percentage = (wins / total) * 100 if total > 0 else 0
-    loss_percentage = 100 - win_percentage
-    
-    conn.close()
-    return win_percentage, loss_percentage
-
-# (Your main trading and Telegram signal sending logic continues here)
