@@ -179,3 +179,68 @@ if __name__ == "__main__":
     bot = QuotexBotCore()
     asyncio.run(bot.run_scanner())
       
+from flask import Flask
+import threading
+import os
+import sqlite3
+import time
+from datetime import datetime
+
+# 1. Initialize Flask server for Render port binding (Port 10000)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot Active"
+
+threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
+
+# 2. Initialize database to store Win/Loss statistics
+def init_db():
+    conn = sqlite3.connect('quotex_stats.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT,
+            direction TEXT,
+            entry_price REAL,
+            result TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# 3. Function to track, evaluate signals and calculate win/loss percentages
+def track_and_evaluate_signal(pair, direction, entry_price, exit_price):
+    conn = sqlite3.connect('quotex_stats.db')
+    cursor = conn.cursor()
+    
+    # Determine result based on direction and price movement
+    if direction == "CALL (UP)" and exit_price > entry_price:
+        result = "WIN"
+    elif direction == "PUT (DOWN)" and exit_price < entry_price:
+        result = "WIN"
+    else:
+        result = "LOSS"
+        
+    cursor.execute("INSERT INTO signals (pair, direction, entry_price, result) VALUES (?, ?, ?, ?)",
+                   (pair, direction, entry_price, result))
+    conn.commit()
+    
+    # Calculate overall Win % and Loss %
+    cursor.execute("SELECT COUNT(*) FROM signals")
+    total = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'WIN'")
+    wins = cursor.fetchone()[0]
+    
+    win_percentage = (wins / total) * 100 if total > 0 else 0
+    loss_percentage = 100 - win_percentage
+    
+    conn.close()
+    return win_percentage, loss_percentage
+
+# (Your main trading and Telegram signal sending logic continues here)
