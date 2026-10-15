@@ -1,216 +1,226 @@
-from flask import Flask
-import threading, os
-import asyncio
+import threading
+import time
+import os
 import sqlite3
-import logging
-import datetime
+import requests
 import numpy as np
 import pandas as pd
-import requests
+from datetime import datetime
+from flask import Flask, request
 
-# 1. Initialize Flask server for Render port binding (Port 10000)
+# --- CONFIGURATION & CREDENTIALS ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
+
 app = Flask(__name__)
 
+# --- DATABASE SETUP FOR PERSISTENT TRACKING ---
+def init_db():
+    """Initialize SQLite database for tracking signals, wins, and losses persistently."""
+    conn = sqlite3.connect('bot_database.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            pair TEXT,
+            direction TEXT,
+            strategy TEXT,
+            status TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def log_signal_to_db(pair, direction, strategy, status="PENDING"):
+    """Save generated signal into the database."""
+    try:
+        conn = sqlite3.connect('bot_database.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO signals (timestamp, pair, direction, strategy, status) VALUES (?, ?, ?, ?, ?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pair, direction, strategy, status)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Database Error: {e}")
+
+def get_stats_from_db():
+    """Fetch win/loss and total signal statistics."""
+    try:
+        conn = sqlite3.connect('bot_database.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM signals")
+        total = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM signals WHERE status='WIN'")
+        wins = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM signals WHERE status='LOSS'")
+        losses = cursor.fetchone()[0]
+        
+        conn.close()
+        return total, wins, losses
+    except Exception as e:
+        print(f"Stats Error: {e}")
+        return 0, 0, 0
+
+# --- FLASK ROUTES FOR RENDER & UPTIMEROBOT ---
 @app.route('/')
 def home():
-    return "Quotex Trading Bot is running 24/7!"
+    return "Quotex OTC Fully Loaded Trading Bot is Running Live 24/7!"
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+@app.route('/health')
+def health_check():
+    """Health check endpoint to keep Render instance active."""
+    return {"status": "healthy", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, 200
 
-# Start web server in a separate thread
-threading.Thread(target=run_web, daemon=True).start()
+@app.route('/webhook', methods=['POST'])
+def telegram_webhook():
+    """Handle incoming Telegram commands (/stats, /status)."""
+    try:
+        data = request.get_json()
+        if data and "message" in data:
+            message = data["message"]
+            text = message.get("text", "").strip()
+            chat_id = message["chat"]["id"]
 
-# 2. Logging Setup
-logging.basicConfig(
-    filename='quotex_bot_execution.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+            if text == "/stats":
+                total, wins, losses = get_stats_from_db()
+                win_rate = (wins / total * 100) if total > 0 else 0
+                response_text = (
+                    f"📊 *Bot Performance Statistics*\n\n"
+                    f"• Total Signals: `{total}`\n"
+                    f"• Wins: `{wins}` 🟢\n"
+                    f"• Losses: `{losses}` 🔴\n"
+                    f"• Win Rate: `{win_rate:.2f}%`"
+                )
+                send_telegram_message_to_chat(chat_id, response_text)
 
-# 3. Telegram Credentials
-TELEGRAM_BOT_TOKEN = "8850686281:AAFQms3YLnynRzHTP8BpZv-AjG5gpNZszpw"
-TELEGRAM_CHAT_ID = "5359177105"
+            elif text == "/status":
+                response_text = "🟢 *Bot Status:* Online & Actively Scanning Breakouts, Breakdowns & Indicators 24/7."
+                send_telegram_message_to_chat(chat_id, response_text)
 
-class DatabaseManager:
-    def __init__(self, db_name="quotex_ledger.db"):
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self.create_tables()
+        return "OK", 200
+    except Exception as e:
+        print(f"Webhook Error: {e}")
+        return "Error", 400
 
-    def create_tables(self):
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                pair TEXT,
-                direction TEXT,
-                strategy_type TEXT,
-                entry_price REAL,
-                status TEXT DEFAULT 'PENDING',
-                result TEXT DEFAULT 'WAITING'
-            )
-        ''')
-        self.conn.commit()
-
-    def log_signal(self, timestamp, pair, direction, strategy_type, entry_price):
-        self.cursor.execute('''
-            INSERT INTO signals (timestamp, pair, direction, strategy_type, entry_price, status)
-            VALUES (?, ?, ?, ?, ?, 'ACTIVE')
-        ''', (timestamp, pair, direction, strategy_type, entry_price))
-        self.conn.commit()
-        return self.cursor.lastrowid
-
-    def update_result(self, signal_id, result):
-        self.cursor.execute('''
-            UPDATE signals SET status = 'CLOSED', result = ? WHERE id = ?
-        ''', (result, signal_id))
-        self.conn.commit()
-
-    def get_performance_report(self):
-        # Get total wins and losses
-        self.cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'WIN'")
-        total_wins = self.cursor.fetchone()[0]
-        
-        self.cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'LOSS'")
-        total_losses = self.cursor.fetchone()[0]
-        
-        total_trades = total_wins + total_losses
-        win_rate = (total_wins / total_trades) * 100 if total_trades > 0 else 0
-        
-        report_message = (
-            f"📊 *Quotex Bot Performance Report*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ Total Wins: {total_wins}\n"
-            f"❌ Total Losses: {total_losses}\n"
-            f"📈 Total Trades: {total_trades}\n"
-            f"🎯 Win Rate: {win_rate:.2f}%"
-        )
-        return report_message
-
-
-class GlitchIndicatorEngine:
-    @staticmethod
-    def calculate_bollinger_bands(prices, period=20, std_dev=2.5):
-        df = pd.Series(prices)
-        sma = df.rolling(window=period).mean()
-        std = df.rolling(window=period).std()
-        upper_band = sma + (std * std_dev)
-        lower_band = sma - (std * std_dev)
-        return upper_band.iloc[-1], lower_band.iloc[-1]
-
-    @staticmethod
-    def calculate_rsi(prices, period=7):
-        df = pd.Series(prices)
-        delta = df.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.iloc[-1]
-
-    @staticmethod
-    def detect_glitches_and_signals(candle_history):
-        if len(candle_history) < 25:
-            return None, None, 0
-
-        closes = [c['close'] for c in candle_history]
-        curr = candle_history[-1]
-        prev = candle_history[-2]
-
-        gap = curr['open'] - prev['close']
-        if gap > 0.0008:
-            return "PUT (DOWN)", "Gap-Up Glitch Reversal", 85
-        elif gap < -0.0008:
-            return "CALL (UP)", "Gap-Down Glitch Reversal", 85
-
-        body_size = abs(curr['close'] - curr['open'])
-        avg_body = np.mean([abs(c['close'] - c['open']) for c in candle_history[-10:]])
-        if body_size < (avg_body * 0.2):
-            return None, "Doji / Manipulation Risk - Skip", 0
-
-        upper, lower = GlitchIndicatorEngine.calculate_bollinger_bands(closes)
-        rsi = GlitchIndicatorEngine.calculate_rsi(closes)
-
-        if curr['close'] <= lower and rsi < 30:
-            return "CALL (UP)", "Bollinger Lower + RSI Oversold", 78
-        elif curr['close'] >= upper and rsi > 70:
-            return "PUT (DOWN)", "Bollinger Upper + RSI Overbought", 78
-
-        return None, None, 0
-
-
-class TelegramNotifier:
-    @staticmethod
-    def send_alert(message):
+def send_telegram_message(message):
+    """Send signal alert to main Telegram chat."""
+    try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Telegram API Error: {e}")
+
+def send_telegram_message_to_chat(chat_id, message):
+    """Send reply to specific chat ID for commands."""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Telegram Reply Error: {e}")
+
+# --- TRADING, BREAKOUT, BREAKDOWN & INDICATOR LOGIC ---
+def analyze_market_and_indicators(prices):
+    """
+    Simulates or computes Bollinger Bands, RSI, Breakout, and Breakdown logic.
+    Returns signal direction and strategy name if condition met, else None.
+    """
+    if len(prices) < 14:
+        return None, None
+
+    # Convert to pandas Series for calculations
+    series = pd.Series(prices)
+    
+    # 1. RSI Calculation (14 period)
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    current_rsi = rsi.iloc[-1]
+
+    # 2. Bollinger Bands Calculation (20 period, 2 std dev)
+    sma = series.rolling(window=20).mean()
+    std = series.rolling(window=20).std()
+    upper_band = sma + (std * 2)
+    lower_band = sma - (std * 2)
+    
+    current_price = series.iloc[-1]
+    curr_upper = upper_band.iloc[-1]
+    curr_lower = lower_band.iloc[-1]
+
+    # 3. Breakout & Breakdown Strategy Logic
+    # Breakout: Price crosses above upper Bollinger Band with RSI confirmation
+    if current_price > curr_upper and current_rsi > 60:
+        return "CALL", "Bollinger Breakout + RSI"
+        
+    # Breakdown: Price crosses below lower Bollinger Band with RSI confirmation
+    elif current_price < curr_lower and current_rsi < 40:
+        return "PUT", "Bollinger Breakdown + RSI"
+
+    return None, None
+
+def market_scanner_loop():
+    """Continuous 24/7 background scanning loop for OTC markets."""
+    print("Background Market Scanner Thread Started Successfully...")
+    send_telegram_message("🚀 *Quotex Fully Loaded Bot* is LIVE 24/7 with Breakout, Breakdown & Indicator Strategies!")
+
+    while True:
         try:
-            requests.post(url, json=payload, timeout=5)
-        except Exception as e:
-            logging.error(f"Telegram alert failed: {e}")
-
-
-class QuotexBotCore:
-    def __init__(self):
-        self.db = DatabaseManager()
-        self.active_pairs = ["EUR/USD-OTC", "GBP/USD-OTC", "USD/JPY-OTC", "AUD/CAD-OTC"]
-
-    async def fetch_live_market_data(self, pair):
-        base_price = 1.0850 + np.random.uniform(-0.0020, 0.0020)
-        simulated_live_candles = []
-        for i in range(30):
-            o = base_price + np.random.uniform(-0.0008, 0.0008)
-            c = o + np.random.uniform(-0.0004, 0.0004)
-            h = max(o, c) + np.random.uniform(0, 0.0002)
-            l = min(o, c) - np.random.uniform(0, 0.0002)
-            simulated_live_candles.append({"open": o, "high": h, "low": l, "close": c})
-        return simulated_live_candles
-
-    async def run_scanner(self):
-        print("Quotex Live Bot Started Successfully...")
-        TelegramNotifier.send_alert("🚀 *Ronak, Your Quotex Live Bot is Running 24/7!*")
-
-        report_counter = 0
-        while True:
-            try:
-                for pair in self.active_pairs:
-                    candles = await self.fetch_live_market_data(pair)
-                    direction, strategy, confidence = GlitchIndicatorEngine.detect_glitches_and_signals(candles)
-
-                    if direction:
-                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        entry_price = candles[-1]['close']
-                        
-                        sig_id = self.db.log_signal(timestamp, pair, direction, strategy, entry_price)
-
-                        alert_msg = (
-                            f"🚨 *LIVE OTC SIGNAL DETECTED*\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"🌐 *Pair:* {pair}\n"
-                            f"🧭 *Direction:* {direction}\n"
-                            f"⚙️ *Strategy:* {strategy}\n"
-                            f"🎯 *Confidence:* {confidence}%\n"
-                            f"⏰ *Time:* {timestamp}"
-                        )
-                        TelegramNotifier.send_alert(alert_msg)
-                        await asyncio.sleep(2)
+            print(f"[{datetime.now().strftime('%H:%M:%S সিস্টेम वेळ')}] Scanning OTC market pairs for Breakouts & Breakdowns...")
+            
+            # --- Dummy / Live Price Feed simulation for testing indicators ---
+            # (In production, replace this list with live fetched candle data from Quotex/API)
+            simulated_prices = np.random.uniform(1.0800, 1.0950, 30).tolist()
+            
+            direction, strategy_name = analyze_market_and_indicators(simulated_prices)
+            
+            if direction and strategy_name:
+                pair = "EURUSD-OTC"
+                timestamp = datetime.now().strftime("%H:%M:%S")
                 
-                # Send performance report periodically or after cycles if needed
-                report_counter += 1
-                if report_counter >= 30:  # e.g., every 30 loops
-                    report = self.db.get_performance_report()
-                    TelegramNotifier.send_alert(report)
-                    report_counter = 0
+                # Format signal message for Telegram
+                signal_msg = (
+                    f"🚨 *QUOTEX OTC SIGNAL* 🚨\n\n"
+                    f"• Pair: `{pair}`\n"
+                    f"• Action: `{'🟢 CALL (UP)' if direction == 'CALL' else '🔴 PUT (DOWN)'}`\n"
+                    f"• Strategy: `{strategy_name}`\n"
+                    f"• Time: `{timestamp}`"
+                )
+                
+                send_telegram_message(signal_msg)
+                log_signal_to_db(pair, direction, strategy_name, "PENDING")
+                print(f"Signal sent: {pair} - {direction} via {strategy_name}")
 
-                # Scan market every 60 seconds
-                await asyncio.sleep(60)
+            # Scan interval (e.g., every 30 seconds)
+            time.sleep(30)
 
-            except Exception as e:
-                logging.error(f"Error in live scanner loop: {e}")
-                await asyncio.sleep(10)
+        except Exception as e:
+            print(f"Error in market scanner loop: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    bot = QuotexBotCore()
-    asyncio.run(bot.run_scanner())
+    # 1. Start market scanner on an independent background thread
+    scanner_thread = threading.Thread(target=market_scanner_loop)
+    scanner_thread.daemon = True
+    scanner_thread.start()
+    
+    # 2. Start Flask web server for Render on port 10000
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
