@@ -115,7 +115,8 @@ def send_telegram_message(message):
             "text": message,
             "parse_mode": "Markdown"
         }
-        requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
+        print(f"Telegram API Response: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"Telegram API Error: {e}")
 
@@ -211,23 +212,15 @@ def market_scanner_loop():
             print(f"Critical Error in scanner loop: {e}")
             time.sleep(15)
 
-if __name__ == "__main__":
+# --- AUTOMATIC THREAD STARTER FOR RENDER ---
+def start_scanner_thread():
     scanner_thread = threading.Thread(target=market_scanner_loop)
     scanner_thread.daemon = True
     scanner_thread.start()
-    
+
+start_scanner_thread()
+
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
-def send_telegram_message(message):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-        response = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram API Response: {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"Telegram API Error: {e}")
-        
+                
