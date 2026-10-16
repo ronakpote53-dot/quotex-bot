@@ -218,3 +218,16 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+def send_telegram_message(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        print(f"Telegram API Response: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"Telegram API Error: {e}")
+        
