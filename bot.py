@@ -138,8 +138,6 @@ def analyze_market_strategy(pair):
     Bollinger Breakout and Gap-Up Glitch Reversal strategies.
     """
     try:
-        # Simulating/fetching latest 30 candles price series for calculation
-        # (In production, replace this price array generator with live WebSocket/API candles data)
         np.random.seed()
         base_price = 1.1000 if "EUR" in pair else 1.3000
         prices = np.random.normal(loc=base_price, scale=0.0008, size=30)
@@ -187,7 +185,6 @@ def market_scanner_loop():
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning all pairs with technical strategies...")
             
-            # Iterate through all pairs in every cycle
             for pair in pairs:
                 direction, strategy_name = analyze_market_strategy(pair)
                 
@@ -206,10 +203,8 @@ def market_scanner_loop():
                     log_signal_to_db(pair, direction, strategy_name, "PENDING")
                     print(f"Valid Signal Triggered: {pair} - {direction} via {strategy_name}")
                     
-                    # Delay between signals to prevent flooding
                     time.sleep(3)
 
-            # Scan interval (every 2 minutes for the next full multi-pair cycle)
             time.sleep(120)
 
         except Exception as e:
@@ -217,11 +212,9 @@ def market_scanner_loop():
             time.sleep(15)
 
 if __name__ == "__main__":
-    # 1. Start background strategy scanner thread safely
     scanner_thread = threading.Thread(target=market_scanner_loop)
     scanner_thread.daemon = True
     scanner_thread.start()
     
-    # 2. Start Flask web server for Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
