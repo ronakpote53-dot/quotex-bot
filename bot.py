@@ -224,3 +224,16 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
                 
+@app.route('/test-telegram')
+def test_telegram():
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": "🧪 *Test Message from Quotex Bot*: API Connection Successful!",
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        return f"Telegram Response Code: {response.status_code}, Body: {response.text}", 200
+    except Exception as e:
+        return f"Error: {str(e)}", 500
